@@ -1,15 +1,28 @@
 import * as cheerio from "cheerio";
 import dotenv from "dotenv";
+import { json } from "stream/consumers";
+import { URLSearchParams } from 'url';
 
 dotenv.config();
 
-async function fetchMenu(url) {
+async function fetchMenu(url, method = "GET", body = null) {
   try {
+    const headers = {
+      "User-Agent": "Mozilla/5.0",
+    };
+    let requestBody = body;
+
+    if (method === "POST" && body && typeof body === 'object') {
+      requestBody = new URLSearchParams(Object.entries(body)).toString();
+      headers['Content-Type'] = 'application/x-www-form-urlencoded';
+      headers['Host'] = 'www.hywoman.ac.kr';
+      headers['Referer'] = 'https://www.hywoman.ac.kr/ko/cms/FrCon/index.do?MENU_ID=1140';
+    }
+
     const response = await fetch(url, {
-      method: "GET",
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-      },
+      method: method,
+      headers: headers,
+      body: requestBody,
     });
 
     if (!response.ok) {
@@ -51,6 +64,66 @@ async function parseMenuItems(url, index = 0) {
   return menuItems;
 }
 
+function getWeekDates() {
+  const today = new Date();
+  const dayOfWeek = today.getDay(); // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
+
+  // Calculate Monday (start of the week)
+  const diffToMonday = dayOfWeek === 0 ? -6 : 1 - dayOfWeek; // Adjust Sunday
+  const startOfWeek = new Date(today);
+  startOfWeek.setDate(today.getDate() + diffToMonday);
+
+  // Calculate Sunday (end of the week)
+  const diffToSunday = dayOfWeek === 0 ? 0 : 7 - dayOfWeek;
+  const endOfWeek = new Date(today);
+  endOfWeek.setDate(today.getDate() + diffToSunday);
+
+  // Calculate defaultDate (endOfWeek - 2 days)
+  const defaultDateObj = new Date(endOfWeek); // Start with endOfWeek
+  defaultDateObj.setDate(endOfWeek.getDate() - 2); // Subtract 2 days
+
+  // Format date to YYYY.MM.DD
+  const formatDate = (date) => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}.${month}.${day}`;
+  };
+
+  return {
+    startOfWeek: formatDate(startOfWeek),
+    endOfWeek: formatDate(endOfWeek),
+    defaultDate: formatDate(defaultDateObj), // Use the new defaultDate calculation
+    currentDate: formatDate(today),
+  };
+}
+
+async function parseHYWUMenuItems(url, index = 0) {
+  const { startOfWeek, endOfWeek, defaultDate, currentDate } = getWeekDates();
+
+  const html = await fetchMenu(url, "POST", {
+    "startOfWeek": startOfWeek,
+    "endOfWeek": endOfWeek,
+    "mode": "next",
+    "defaultDate": defaultDate,
+    "currentDate": currentDate,
+  });
+  console.log(html);
+
+  const menuItems = [];
+  const json = JSON.parse(html);
+  
+  json["data"]["carte"].filter((item) => item["BISTRO_SEQ"] === index).forEach((item) => {
+    menuItems.push({
+      name: item["CARTE_CONT"],
+      price: index === 1 ? "6,200원" : "5,200원",
+      imageUrl: "",
+    });
+  });
+
+  return menuItems;
+}
+
 async function sendToSlack(webhookUrl, blocks) {
   await fetch(webhookUrl, {
     method: "POST",
@@ -77,6 +150,16 @@ async function main() {
       title: "한양플라자 3층",
       url: "https://www.hanyang.ac.kr/web/www/re1",
       items: await parseMenuItems("https://www.hanyang.ac.kr/web/www/re1", 1),
+    },
+    {
+      title: "행원스퀘어 교직원식당",
+      url: "https://www.hywoman.ac.kr/ko/cms/FrCon/index.do?MENU_ID=1140",
+      items: await parseHYWUMenuItems("https://www.hywoman.ac.kr/ajaxf/FrProgramSvc/getDayFood.do", 1),
+    },
+    {
+      title: "행원스퀘어 학생식당",
+      url: "https://www.hywoman.ac.kr/ko/cms/FrCon/index.do?MENU_ID=1140",
+      items: await parseHYWUMenuItems("https://www.hywoman.ac.kr/ajaxf/FrProgramSvc/getDayFood.do", 2),
     },
   ];
 
@@ -116,18 +199,11 @@ async function main() {
         {
           type: "section",
           text: { type: "mrkdwn", text: `*${item.name}*\n가격: ${item.price}` },
-          accessory: {
-            type: "image",
-            image_url: item.imageUrl,
-            alt_text: item.name,
-          },
         },
         { type: "divider" }
       );
     });
   });
-
-  console.log("Menu data:", blocks);
 
   await sendToSlack(webhookUrl, blocks);
 
